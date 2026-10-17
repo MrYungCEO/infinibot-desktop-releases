@@ -26,6 +26,7 @@ const SHOTS = path.join(OUT, "shots");
 const FIXTURE_WAV = path.resolve("fixtures/known-quick-brown-fox.wav");
 const FEED = "https://github.com/MrYungCEO/infinibot-desktop-releases/releases/latest/download";
 const PLATFORM = process.env.IB_GATE_PLATFORM || process.platform;
+const VARIANT = process.env.IB_GATE_VARIANT || "";
 const SKIP = new Set((process.env.IB_GATE_SKIP || "").split(",").map((s) => s.trim()).filter(Boolean));
 
 const BRAIN_CARDS = (process.env.IB_GATE_BRAIN_CARDS || "gemini-cli,codex-cli,claude-cli,grok-cli").split(",");
@@ -47,7 +48,7 @@ const PROVIDER_KEYS: Record<string, string | undefined> = {
 type Status = "pass" | "fail" | "skip";
 type Check = { id: string; title: string; status: Status; detail: string; ms: number; shots: string[] };
 const checks: Check[] = [];
-const facts: Record<string, unknown> = { platform: PLATFORM, startedAt: new Date().toISOString() };
+const facts: Record<string, unknown> = { platform: PLATFORM, variant: VARIANT, startedAt: new Date().toISOString() };
 const inAppWindows: Array<{ url: string; at: number }> = [];
 let shotN = 0;
 
@@ -99,7 +100,7 @@ function writeResults() {
   fs.writeFileSync(
     path.join(OUT, "summary.md"),
     [
-      `## Release gate — ${PLATFORM} — InfiniBot ${facts.appVersion ?? "?"}`,
+      `## Release gate — ${PLATFORM}${VARIANT ? ` (${VARIANT})` : ""} — InfiniBot ${facts.appVersion ?? "?"}`,
       "",
       failed ? `**${failed} check(s) FAILED**` : "**All checks passed**",
       "",

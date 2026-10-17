@@ -50,6 +50,15 @@ env:
 
 jobs:
   windows:
+    # A real consumer Windows PC, not the runner image: no Node, no Docker,
+    # minimal PATH, and the VC++ runtime either stale (14.29, very common on
+    # home PCs: 2026.10.18's native voice died with "DLL initialization routine
+    # failed") or missing. The runner image's current runtime hid that bug.
+    strategy:
+      fail-fast: false
+      matrix:
+        vcruntime: [old-14.29, missing]
+    name: windows (vcruntime ${{ matrix.vcruntime }})
     runs-on: windows-latest
     timeout-minutes: 110
     outputs:
@@ -82,11 +91,35 @@ jobs:
           }
           # Docker too: a new user's machine has none (runner images ship it).
           foreach ($svc in @('docker','com.docker.service')) { Stop-Service $svc -Force -ErrorAction SilentlyContinue }
-          $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'node|npm|nvm|yarn|pnpm|hostedtoolcache|docker' }) -join ';'
+          # PATH of a fresh Windows 11 user, nothing from the runner image.
+          $clean = @("$env:WINDIR\system32", "$env:WINDIR", "$env:WINDIR\System32\Wbem", "$env:WINDIR\System32\WindowsPowerShell\v1.0\", "$env:WINDIR\System32\OpenSSH\", "$env:LOCALAPPDATA\Microsoft\WindowsApps") -join ';'
           "IB_GATE_CLEAN_PATH=$clean" >> $env:GITHUB_ENV
           $env:PATH = $clean
           foreach ($c in @('node','npm','npx','docker')) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH: $((Get-Command $c).Source)" } }
           "no node/npm/npx/docker on PATH"
+      - name: VC++ runtime like a consumer PC (${{ matrix.vcruntime }})
+        run: |
+          $sys = "$env:WINDIR\System32"
+          $dlls = 'msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll','msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','concrt140.dll','vccorlib140.dll','vcomp140.dll'
+          "before: msvcp140 $((Get-Item "$sys\msvcp140.dll").VersionInfo.FileVersion)"
+          if ('${{ matrix.vcruntime }}' -eq 'old-14.29') {
+            python -m pip download msvc-runtime==14.29.30133 --no-deps --only-binary=:all: --platform win_amd64 --python-version 3.10 -d "$env:RUNNER_TEMP\vc" -q
+            $whl = Get-ChildItem "$env:RUNNER_TEMP\vc\*.whl" | Select-Object -First 1
+            Copy-Item $whl.FullName "$env:RUNNER_TEMP\vc\w.zip"; Expand-Archive "$env:RUNNER_TEMP\vc\w.zip" "$env:RUNNER_TEMP\vc\x" -Force
+          }
+          foreach ($d in $dlls) {
+            $p = Join-Path $sys $d
+            if (Test-Path $p) {
+              takeown /f $p /a | Out-Null; icacls $p /grant "*S-1-5-32-544:F" | Out-Null
+              Rename-Item $p "$d.gate-hidden"
+            }
+            if ('${{ matrix.vcruntime }}' -eq 'old-14.29') {
+              $old = Get-ChildItem "$env:RUNNER_TEMP\vc\x" -Recurse -Filter $d | Select-Object -First 1
+              if ($old) { Copy-Item $old.FullName $p }
+            }
+          }
+          if (Test-Path "$sys\msvcp140.dll") { "after: msvcp140 $((Get-Item "$sys\msvcp140.dll").VersionInfo.FileVersion)" } else { "after: no msvcp140.dll in System32" }
+          if ('${{ matrix.vcruntime }}' -eq 'old-14.29' -and -not ((Get-Item "$sys\msvcp140.dll").VersionInfo.FileVersion -like '14.29*')) { throw "old runtime not in place" }
       - name: Silent install (NSIS /S)
         timeout-minutes: 20
         run: |
@@ -104,6 +137,7 @@ jobs:
         env:
           IB_GATE_APP: C:\IBGate\InfiniBot\InfiniBot.exe
           IB_GATE_PLATFORM: windows
+          IB_GATE_VARIANT: vcruntime-${{ matrix.vcruntime }}
           IB_GATE_EXPECT_VERSION: ${{ inputs.tag }}
         run: |
           $env:PATH = $env:IB_GATE_CLEAN_PATH
@@ -115,7 +149,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gate-windows
+          name: gate-windows-${{ matrix.vcruntime }}
           path: gate/out
           if-no-files-found: warn
 
@@ -154,7 +188,7 @@ jobs:
           for f in /usr/bin/docker /usr/local/bin/docker /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/podman; do
             if [ -e "$f" ]; then sudo mv "$f" "$f.gate-hidden"; echo "hid $f"; fi
           done
-          clean=$(echo "$PATH" | tr ':' '\n' | grep -viE 'node|npm|nvm|yarn|pnpm|hostedtoolcache' | paste -sd:)
+          clean=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
           echo "IB_GATE_CLEAN_PATH=$clean" >> "$GITHUB_ENV"
           for c in node npm npx docker; do if PATH="$clean" command -v $c; then echo "$c still on PATH"; exit 1; fi; done
           echo "no node/npm/npx/docker on PATH"
