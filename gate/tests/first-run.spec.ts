@@ -342,18 +342,19 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     return `offered: ${offered.join(", ")}`;
   });
   for (const name of PROVIDERS) {
-    await check(page, `provider-${slug(name)}`, `${name}: key field + model picker`, async () => {
-      await openApiKeyPanel(page);
-      const card = page.locator(".iob-prov", { has: page.locator(".sob-opt__title", { hasText: new RegExp(`^\\s*${escapeRe(name)}\\s*$`, "i") }) });
-      if (!(await card.first().isVisible().catch(() => false))) throw new Error(`${name} is not in the provider list`);
-      await card.first().click();
+    const picker = await check(page, `provider-${slug(name)}`, `${name}: key field + model picker`, async () => {
+      await selectProvider(page, name);
       await expect(page.locator('[data-testid="onb-api-key"]')).toBeVisible();
       const model = page.locator(".sob-field", { hasText: "Model" }).locator("select, input");
       await expect(model.first()).toBeVisible();
+      return `key field + model field (${await model.first().evaluate((e) => e.tagName.toLowerCase())}) present`;
+    });
+    const secret = `IB_GATE_${slug(name).toUpperCase().replace(/-/g, "_")}_KEY`;
+    await check(page, `provider-${slug(name)}-live-key`, `${name}: real key → model picker lists models`, async () => {
       const key = PROVIDER_KEYS[name];
-      if (!key) {
-        return `key field + model field present; live key test SKIPPED (no IB_GATE_${slug(name).toUpperCase().replace(/-/g, "_")}_KEY secret)`;
-      }
+      if (!key) throw new Skip(`no ${secret} repo secret`);
+      if (picker !== "pass") throw new Error("provider picker unavailable");
+      await selectProvider(page, name);
       await page.locator('[data-testid="onb-api-key"]').fill(key);
       await page.getByRole("button", { name: "Check key" }).click();
       const sel = page.locator(".sob-field", { hasText: "Model" }).locator("select");
@@ -402,7 +403,10 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     facts.voiceSetup = { final, secs: Math.round((Date.now() - t0) / 1000), headline, log: log?.slice(-3000) };
     const st = await rpc(page, "voice.local.status", {}).catch((e) => ({ rpcError: String(e) }));
     facts.voiceStatus = st;
-    if (final !== "done") throw new Error(`voice setup ended "${final ?? "timeout"}": ${headline || ""}\n${(log || "").slice(-1200)}`);
+    const engine = (st as any)?.state?.engine ?? (st as any)?.engine;
+    const err = (st as any)?.state?.error;
+    if (final !== "done") throw new Error(`voice setup ended "${final ?? "timeout"}" (engine ${engine}): ${headline || ""} ${err ? JSON.stringify(err).slice(0, 600) : ""}\n${(log || "").slice(-1200)}`);
+    if (engine && engine !== "native") throw new Error(`voice setup finished on the "${engine}" engine, not the built-in native engine`);
     return `voice ready in ${Math.round((Date.now() - t0) / 1000)} s`;
   });
 
@@ -445,7 +449,43 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     return `${backend}; TTS ${wav.length} B in ${ttsMs} ms; STT "${tj.text}" in ${Date.now() - t1} ms`;
   });
 
-  // ── 7. Finish onboarding → first chat ───────────────────────────────────
+  // ── 7. Phone step: Tailscale remote access (sibling run feat/onboarding-tailscale)
+  await check(page, "remote-access-tailscale", "Phone step: Tailscale remote access — status RPC + download/sign-in open the system browser", async () => {
+    await advanceUntil(page, async () => visible(page, '[data-testid="onb-phone"]'), 6);
+    const st: any = await rpc(page, "network.tailscale.remote.status", {}, 60_000).catch((e) => {
+      throw new Error(`network.tailscale.remote.status failed: ${String(e?.message ?? e)}`);
+    });
+    facts.tailscale = st;
+    const notes = [`status installed=${st?.installed} backendState=${st?.backendState} nextStep=${st?.nextStep}`];
+    if (st?.installed === undefined || !st?.nextStep) throw new Error(`status missing installed/nextStep: ${JSON.stringify(st).slice(0, 400)}`);
+    if (!st.installed) {
+      if (st.nextStep !== "install") throw new Error(`not installed but nextStep=${st.nextStep}`);
+      if (PLATFORM === "windows" && st.downloadUrl !== "https://tailscale.com/download/windows") throw new Error(`downloadUrl ${st.downloadUrl}`);
+    }
+    const ra = page.locator("ib-remote-access-setup");
+    if (!(await ra.first().isVisible({ timeout: 20_000 }).catch(() => false))) throw new Error("<ib-remote-access-setup> not rendered on the Phone step");
+    await shot(page, "remote-access");
+    const btn = page.locator('[data-testid="ra-download"], [data-testid="ra-signin"]').first();
+    if (await btn.isVisible({ timeout: 20_000 }).catch(() => false)) {
+      const label = ((await btn.textContent()) || "").trim();
+      await watchRpcs(page);
+      const h = await expectExternalHandoff(app, async () => void (await btn.click()));
+      const rpcs: string[] = await page.evaluate(() => (window as any).__gateRpcs ?? []);
+      const viaRpc = rpcs.includes("network.tailscale.remote.open");
+      notes.push(`"${label}" → openExternal ${h.external.join(" ") || "none"}; remote.open RPC ${viaRpc}`);
+      if (h.inApp.length) throw new Error(`"${label}" opened INSIDE the app: ${h.inApp.join(" ")}`);
+      if (!h.external.length && !viaRpc) throw new Error(`"${label}" opened nothing (no openExternal, no network.tailscale.remote.open)`);
+    } else notes.push(`no download/sign-in button (nextStep ${st.nextStep})`);
+    if (st.installed && st.backendState === "Running") {
+      const made: any = await rpc(page, "network.tailscale.remote.create", {}, 120_000);
+      const port = made?.httpsPort ?? made?.mapping?.httpsPort;
+      notes.push(`create → ${JSON.stringify(made).slice(0, 200)}`);
+      if (port) notes.push(`remove → ${JSON.stringify(await rpc(page, "network.tailscale.remote.remove", { httpsPort: port }, 60_000)).slice(0, 200)}`);
+    } else notes.push("create/remove skipped: Tailscale not signed in on this runner");
+    return notes.join("\n");
+  });
+
+  // ── 8. Finish onboarding → first chat ───────────────────────────────────
   await check(page, "finish-onboarding", "Phone / Privacy / Plan / Finish", async () => {
     await advanceUntil(page, async () => visible(page, '[data-testid="onb-finish"]'), 8);
     await page.locator('[data-testid="onb-finish"]').click();
@@ -457,8 +497,14 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
 
   await check(page, "first-chat", "First chat message gets an answer (or a clear next step)", async () => {
     const input = page.locator("textarea.wc-input");
-    if (!(await input.isVisible({ timeout: 20_000 }).catch(() => false))) {
-      await page.goto(`${facts.gatewayUrl}/webchat`);
+    // Finishing onboarding enables plugins → the gateway restarts (seconds).
+    if (!(await input.isVisible({ timeout: 30_000 }).catch(() => false))) {
+      for (let i = 0; i < 6; i++) {
+        await until(async () => (await fetch(`${facts.gatewayUrl}/health`).catch(() => null))?.ok, 120_000, 2000);
+        const ok = await page.goto(`${facts.gatewayUrl}/webchat`).then(() => true, () => false);
+        if (ok && (await input.isVisible({ timeout: 30_000 }).catch(() => false))) break;
+        await sleep(5000);
+      }
     }
     await expect(input).toBeVisible({ timeout: 60_000 });
     await expect(input).toBeEnabled({ timeout: 60_000 });
@@ -480,7 +526,7 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     return `${got.kind}: ${got.text.slice(0, 300)}${brainSaved ? "" : " (no brain configured in CI: no provider key secret and no signed-in subscription)"}`;
   });
 
-  // ── 8. Update widget shows the DESKTOP feed version ────────────────────
+  // ── 9. Update widget shows the DESKTOP feed version ────────────────────
   await check(page, "update-widget", "Sidebar update widget follows the desktop release feed", async () => {
     const yml = await fetch(`${FEED}/${PLATFORM === "linux" ? "latest-linux.yml" : "latest.yml"}`).then((r) => r.text());
     const feedVersion = /^version:\s*(\S+)/m.exec(yml)?.[1];
@@ -506,7 +552,7 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     return `"${text}" (app v${facts.appVersion}, feed v${feedVersion})`;
   });
 
-  // ── 9. External links go to the system browser ─────────────────────────
+  // ── 10. External links go to the system browser ─────────────────────────
   await check(page, "external-links", "External links open in the system browser (openExternal), never in-app", async () => {
     const results: string[] = [];
     const bad: string[] = [];
@@ -592,6 +638,13 @@ async function openApiKeyPanel(p: Page) {
   await expect(p.locator('[data-testid="onb-api-key"]')).toBeVisible({ timeout: 15_000 });
 }
 
+async function selectProvider(p: Page, name: string) {
+  await openApiKeyPanel(p);
+  const card = p.locator(".iob-prov", { has: p.locator(".sob-opt__title", { hasText: new RegExp(`^\\s*${escapeRe(name)}\\s*$`, "i") }) });
+  if (!(await card.first().isVisible().catch(() => false))) throw new Error(`${name} is not in the provider list`);
+  await card.first().click();
+}
+
 async function advanceUntil(p: Page, done: () => Promise<boolean>, max: number) {
   for (let i = 0; i < max; i++) {
     if (await done()) return;
@@ -605,10 +658,27 @@ async function advanceUntil(p: Page, done: () => Promise<boolean>, max: number) 
   if (!(await done())) throw new Error(`target step not reached after ${max} steps`);
 }
 
+/** Record every gateway RPC method the UI sends from now on (window.__gateRpcs). */
+async function watchRpcs(p: Page) {
+  await p.evaluate(() => {
+    const w = window as any;
+    const c = w.__infinibotGatewayClient ?? (document.querySelector("infinibot-app") as any)?.client;
+    if (!c || c.__gateWrapped) return;
+    w.__gateRpcs = [];
+    const orig = c.request.bind(c);
+    c.request = (m: string, ...rest: unknown[]) => {
+      w.__gateRpcs.push(m);
+      return orig(m, ...rest);
+    };
+    c.__gateWrapped = true;
+  });
+}
+
 async function engineUrl(p: Page): Promise<string> {
   const st: any = await rpc(p, "voice.local.status", {}).catch(() => null);
-  const found = JSON.stringify(st ?? {}).match(/https?:\/\/(?:127\.0\.0\.1|localhost):\d+/);
-  return found?.[0] ?? "http://127.0.0.1:8886";
+  const ne = st?.state?.nativeEngine ?? st?.nativeEngine;
+  if (ne?.url) return String(ne.url).replace(/\/$/, "");
+  return `http://127.0.0.1:${ne?.port ?? 8886}`;
 }
 
 function slug(s: string) {

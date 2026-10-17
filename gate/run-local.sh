@@ -31,12 +31,14 @@ echo "scratch $S"
 for d in /usr/bin /bin /usr/sbin; do
   for f in "$d"/*; do
     b=$(basename "$f")
-    case "$b" in node|nodejs|npm|npx|corepack|yarn|pnpm) continue ;; esac
+    # docker too: a clean new-user machine has neither (and the app must never
+    # touch this host's own voice containers).
+    case "$b" in node|nodejs|npm|npx|corepack|yarn|pnpm|docker|docker-compose|podman|nvidia-smi) continue ;; esac
     [ -e "$S/bin/$b" ] || ln -s "$f" "$S/bin/$b"
   done
 done
 CLEAN_PATH="$S/bin"
-if env -i PATH="$CLEAN_PATH" sh -c 'command -v node || command -v npm' >/dev/null; then echo "node still on PATH"; exit 1; fi
+if env -i PATH="$CLEAN_PATH" sh -c 'command -v node || command -v npm || command -v docker' >/dev/null; then echo "node/docker still on PATH"; exit 1; fi
 
 # Own Xvfb.
 XVFB=$(command -v Xvfb || echo /tmp/ib-xvfb/root/usr/bin/Xvfb)

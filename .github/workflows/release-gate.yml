@@ -51,7 +51,7 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 110
     outputs:
       sha256: ${{ steps.dl.outputs.sha256 }}
     defaults:
@@ -73,24 +73,33 @@ jobs:
       - name: Install Playwright (gate runner only)
         working-directory: gate
         run: npm install --no-audit --no-fund "@playwright/test@$env:PLAYWRIGHT_VERSION"
-      - name: Make the machine Node-free (keep a private node for Playwright)
+      - name: Make the machine Node- and Docker-free (keep a private node for Playwright)
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\gate-node" | Out-Null
           Copy-Item (Get-Command node).Source "$env:RUNNER_TEMP\gate-node\node.exe"
           foreach ($d in @("C:\Program Files\nodejs", "$env:RUNNER_TOOL_CACHE\node", "C:\npm\prefix", "$env:APPDATA\npm")) {
             if (Test-Path $d) { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden"); "hid $d" }
           }
-          $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'node|npm|nvm|yarn|pnpm|hostedtoolcache' }) -join ';'
+          # Docker too: a new user's machine has none (runner images ship it).
+          foreach ($svc in @('docker','com.docker.service')) { Stop-Service $svc -Force -ErrorAction SilentlyContinue }
+          $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'node|npm|nvm|yarn|pnpm|hostedtoolcache|docker' }) -join ';'
           "IB_GATE_CLEAN_PATH=$clean" >> $env:GITHUB_ENV
           $env:PATH = $clean
-          foreach ($c in @('node','npm','npx')) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH" } }
-          "no node/npm/npx on PATH"
+          foreach ($c in @('node','npm','npx','docker')) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH: $((Get-Command $c).Source)" } }
+          "no node/npm/npx/docker on PATH"
       - name: Silent install (NSIS /S)
+        timeout-minutes: 20
         run: |
-          $p = Start-Process "$env:RUNNER_TEMP\dl\InfiniBot-Setup-x64.exe" -ArgumentList '/S','/D=C:\IBGate\InfiniBot' -Wait -PassThru
-          "installer exit $($p.ExitCode)"
+          # WaitForExit on the installer process only: Start-Process -Wait also
+          # waits for every descendant.
+          $t0 = Get-Date
+          $p = Start-Process "$env:RUNNER_TEMP\dl\InfiniBot-Setup-x64.exe" -ArgumentList '/S','/D=C:\IBGate\InfiniBot' -PassThru
+          if (-not $p.WaitForExit(900000)) { Get-Process | Sort-Object StartTime -ErrorAction SilentlyContinue | Select-Object -Last 15 Name,Id,StartTime | Format-Table | Out-String; throw "installer still running after 15 min" }
+          "installer exit $($p.ExitCode) in $([int]((Get-Date) - $t0).TotalSeconds) s"
+          Get-Process | Where-Object { $_.Name -match 'InfiniBot|Setup' } | Format-Table Name,Id | Out-String
           if (-not (Test-Path 'C:\IBGate\InfiniBot\InfiniBot.exe')) { Get-ChildItem C:\IBGate -Recurse -Depth 1; throw "InfiniBot.exe not installed" }
       - name: End-to-end onboarding
+        timeout-minutes: 80
         working-directory: gate
         env:
           IB_GATE_APP: C:\IBGate\InfiniBot\InfiniBot.exe
@@ -112,7 +121,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 110
     outputs:
       sha256: ${{ steps.dl.outputs.sha256 }}
     steps:
@@ -133,18 +142,24 @@ jobs:
         run: |
           npm install --no-audit --no-fund "@playwright/test@$PLAYWRIGHT_VERSION"
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb > /dev/null
-      - name: Make the machine Node-free (keep a private node for Playwright)
+      - name: Make the machine Node- and Docker-free (keep a private node for Playwright)
         run: |
           mkdir -p "$RUNNER_TEMP/gate-node" && cp "$(command -v node)" "$RUNNER_TEMP/gate-node/node"
           for f in /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/bin/node /usr/bin/npm /usr/bin/npx; do
             if [ -e "$f" ]; then sudo mv "$f" "$f.gate-hidden"; echo "hid $f"; fi
           done
           if [ -d "$RUNNER_TOOL_CACHE/node" ]; then sudo mv "$RUNNER_TOOL_CACHE/node" "$RUNNER_TOOL_CACHE/node.gate-hidden"; echo "hid toolcache node"; fi
+          # Docker too: a new user's machine has none (runner images ship it).
+          sudo systemctl stop docker.socket docker containerd 2>/dev/null || true
+          for f in /usr/bin/docker /usr/local/bin/docker /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/podman; do
+            if [ -e "$f" ]; then sudo mv "$f" "$f.gate-hidden"; echo "hid $f"; fi
+          done
           clean=$(echo "$PATH" | tr ':' '\n' | grep -viE 'node|npm|nvm|yarn|pnpm|hostedtoolcache' | paste -sd:)
           echo "IB_GATE_CLEAN_PATH=$clean" >> "$GITHUB_ENV"
-          for c in node npm npx; do if PATH="$clean" command -v $c; then echo "$c still on PATH"; exit 1; fi; done
-          echo "no node/npm/npx on PATH"
+          for c in node npm npx docker; do if PATH="$clean" command -v $c; then echo "$c still on PATH"; exit 1; fi; done
+          echo "no node/npm/npx/docker on PATH"
       - name: End-to-end onboarding
+        timeout-minutes: 80
         working-directory: gate
         env:
           IB_GATE_APP: ${{ runner.temp }}/dl/InfiniBot-x86_64.AppImage
