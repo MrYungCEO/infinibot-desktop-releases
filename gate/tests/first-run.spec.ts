@@ -435,7 +435,7 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     facts.voiceHealth = health;
     if (!health) throw new Error(`engine at ${base} never became healthy`);
     if (health.status !== "ok") throw new Error(`engine failed to load: ${health.error ?? JSON.stringify(health)}`);
-    const backend = `tts=${health.tts ?? "?"} stt=${health.stt ?? "?"} sttModel=${health.sttModel ?? "?"} sttDevice=${health.sttDevice ?? "?"}`;
+    const backend = `backend=${health.backend ?? "native (pre-10.19: no field)"} tts=${health.tts ?? "?"} stt=${health.stt ?? "?"} sttModel=${health.sttModel ?? "?"} sttDevice=${health.sttDevice ?? "?"}`;
     // TTS
     const t0 = Date.now();
     const sr = await fetch(`${base}/v1/audio/speech`, {
