@@ -1,0 +1,189 @@
+# Release gate for InfiniBot Desktop. Source of truth:
+#   InfiniBot scripts/desktop/release-gate/release-gate.yml (synced to the PUBLIC
+#   releases repo by scripts/desktop/release-gate/sync-to-releases-repo.sh).
+#
+# Installs the packaged installers from a (draft) GitHub release on REAL
+# windows-latest and ubuntu-latest runners with NO Node on PATH, then drives the
+# app with Playwright's Electron support through the whole new-user onboarding.
+# Only when both platforms pass does the `verdict` job upload
+#   release-gate-pass-<exe sha[0:16]>-<AppImage sha[0:16]>
+# which scripts/desktop/publish-github-release.sh requires before it publishes.
+name: release-gate
+run-name: "release gate ${{ inputs.tag }}${{ inputs.label && format(' — {0}', inputs.label) || '' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag holding the installers (draft OK), e.g. v2026.10.19"
+        required: true
+      label:
+        description: "Free text shown in the run name (e.g. candidate 3f2a1b)"
+        required: false
+        default: ""
+      expected_exe_sha256:
+        description: "Optional: fail unless the downloaded exe has this sha256"
+        required: false
+        default: ""
+      expected_appimage_sha256:
+        description: "Optional: fail unless the downloaded AppImage has this sha256"
+        required: false
+        default: ""
+
+# Drafts are only visible to tokens with push access.
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-gate-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  PLAYWRIGHT_VERSION: "1.64.1"
+  # Optional real-key provider tests. Unset secrets → those checks are skipped.
+  IB_GATE_OLLAMA_CLOUD_KEY: ${{ secrets.IB_GATE_OLLAMA_CLOUD_KEY }}
+  IB_GATE_OPENAI_KEY: ${{ secrets.IB_GATE_OPENAI_KEY }}
+  IB_GATE_ANTHROPIC_KEY: ${{ secrets.IB_GATE_ANTHROPIC_KEY }}
+  IB_GATE_OPENROUTER_KEY: ${{ secrets.IB_GATE_OPENROUTER_KEY }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.dl.outputs.sha256 }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: gate }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Download installer
+        id: dl
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p InfiniBot-Setup-x64.exe -D "$env:RUNNER_TEMP\dl"
+          $sha = (Get-FileHash "$env:RUNNER_TEMP\dl\InfiniBot-Setup-x64.exe" -Algorithm SHA256).Hash.ToLower()
+          "sha256=$sha" >> $env:GITHUB_OUTPUT
+          "exe sha256 $sha"
+          if ("${{ inputs.expected_exe_sha256 }}" -and "${{ inputs.expected_exe_sha256 }}" -ne $sha) { throw "exe sha256 mismatch" }
+      - name: Install Playwright (gate runner only)
+        working-directory: gate
+        run: npm install --no-audit --no-fund "@playwright/test@$env:PLAYWRIGHT_VERSION"
+      - name: Make the machine Node-free (keep a private node for Playwright)
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\gate-node" | Out-Null
+          Copy-Item (Get-Command node).Source "$env:RUNNER_TEMP\gate-node\node.exe"
+          foreach ($d in @("C:\Program Files\nodejs", "$env:RUNNER_TOOL_CACHE\node", "C:\npm\prefix", "$env:APPDATA\npm")) {
+            if (Test-Path $d) { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden"); "hid $d" }
+          }
+          $clean = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'node|npm|nvm|yarn|pnpm|hostedtoolcache' }) -join ';'
+          "IB_GATE_CLEAN_PATH=$clean" >> $env:GITHUB_ENV
+          $env:PATH = $clean
+          foreach ($c in @('node','npm','npx')) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH" } }
+          "no node/npm/npx on PATH"
+      - name: Silent install (NSIS /S)
+        run: |
+          $p = Start-Process "$env:RUNNER_TEMP\dl\InfiniBot-Setup-x64.exe" -ArgumentList '/S','/D=C:\IBGate\InfiniBot' -Wait -PassThru
+          "installer exit $($p.ExitCode)"
+          if (-not (Test-Path 'C:\IBGate\InfiniBot\InfiniBot.exe')) { Get-ChildItem C:\IBGate -Recurse -Depth 1; throw "InfiniBot.exe not installed" }
+      - name: End-to-end onboarding
+        working-directory: gate
+        env:
+          IB_GATE_APP: C:\IBGate\InfiniBot\InfiniBot.exe
+          IB_GATE_PLATFORM: windows
+          IB_GATE_EXPECT_VERSION: ${{ inputs.tag }}
+        run: |
+          $env:PATH = $env:IB_GATE_CLEAN_PATH
+          & "$env:RUNNER_TEMP\gate-node\node.exe" node_modules/@playwright/test/cli.js test
+      - name: Summary
+        if: always()
+        working-directory: gate
+        run: if (Test-Path out/summary.md) { Get-Content out/summary.md >> $env:GITHUB_STEP_SUMMARY }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-windows
+          path: gate/out
+          if-no-files-found: warn
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.dl.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: gate }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Download AppImage
+        id: dl
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p InfiniBot-x86_64.AppImage -D "$RUNNER_TEMP/dl"
+          chmod +x "$RUNNER_TEMP/dl/InfiniBot-x86_64.AppImage"
+          sha=$(sha256sum "$RUNNER_TEMP/dl/InfiniBot-x86_64.AppImage" | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"; echo "AppImage sha256 $sha"
+          if [ -n "${{ inputs.expected_appimage_sha256 }}" ] && [ "${{ inputs.expected_appimage_sha256 }}" != "$sha" ]; then echo "sha mismatch"; exit 1; fi
+      - name: Install Playwright (gate runner only) + xvfb
+        working-directory: gate
+        run: |
+          npm install --no-audit --no-fund "@playwright/test@$PLAYWRIGHT_VERSION"
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb > /dev/null
+      - name: Make the machine Node-free (keep a private node for Playwright)
+        run: |
+          mkdir -p "$RUNNER_TEMP/gate-node" && cp "$(command -v node)" "$RUNNER_TEMP/gate-node/node"
+          for f in /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/bin/node /usr/bin/npm /usr/bin/npx; do
+            if [ -e "$f" ]; then sudo mv "$f" "$f.gate-hidden"; echo "hid $f"; fi
+          done
+          if [ -d "$RUNNER_TOOL_CACHE/node" ]; then sudo mv "$RUNNER_TOOL_CACHE/node" "$RUNNER_TOOL_CACHE/node.gate-hidden"; echo "hid toolcache node"; fi
+          clean=$(echo "$PATH" | tr ':' '\n' | grep -viE 'node|npm|nvm|yarn|pnpm|hostedtoolcache' | paste -sd:)
+          echo "IB_GATE_CLEAN_PATH=$clean" >> "$GITHUB_ENV"
+          for c in node npm npx; do if PATH="$clean" command -v $c; then echo "$c still on PATH"; exit 1; fi; done
+          echo "no node/npm/npx on PATH"
+      - name: End-to-end onboarding
+        working-directory: gate
+        env:
+          IB_GATE_APP: ${{ runner.temp }}/dl/InfiniBot-x86_64.AppImage
+          IB_GATE_PLATFORM: linux
+          IB_GATE_EXPECT_VERSION: ${{ inputs.tag }}
+        run: PATH="$IB_GATE_CLEAN_PATH" xvfb-run -a -s "-screen 0 1440x900x24" "$RUNNER_TEMP/gate-node/node" node_modules/@playwright/test/cli.js test
+      - name: Summary
+        if: always()
+        working-directory: gate
+        run: '[ -f out/summary.md ] && cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-linux
+          path: gate/out
+          if-no-files-found: warn
+
+  verdict:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write verdict
+        run: |
+          EXE=${{ needs.windows.outputs.sha256 }}; APP=${{ needs.linux.outputs.sha256 }}
+          mkdir -p v
+          cat > v/verdict.json <<EOF
+          {
+            "result": "pass",
+            "tag": "${{ inputs.tag }}",
+            "exe_sha256": "$EXE",
+            "appimage_sha256": "$APP",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "workflow_sha": "${{ github.sha }}"
+          }
+          EOF
+          cat v/verdict.json
+          echo "NAME=release-gate-pass-${EXE:0:16}-${APP:0:16}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: v/verdict.json
+          retention-days: 90

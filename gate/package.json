@@ -1,0 +1,7 @@
+{
+  "name": "infinibot-desktop-release-gate",
+  "private": true,
+  "description": "End-to-end gate for packaged InfiniBot Desktop installers (real Windows + Linux).",
+  "scripts": { "test": "playwright test" },
+  "devDependencies": { "@playwright/test": "1.64.1" }
+}
