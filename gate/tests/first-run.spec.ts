@@ -357,14 +357,25 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
       if (picker !== "pass") throw new Error("provider picker unavailable");
       await selectProvider(page, name);
       await page.locator('[data-testid="onb-api-key"]').fill(key);
-      await page.getByRole("button", { name: "Check key" }).click();
-      const sel = page.locator(".sob-field", { hasText: "Model" }).locator("select");
-      await expect(sel).toBeVisible({ timeout: 60_000 });
-      const n = await sel.locator("option").count();
-      if (n < 1) throw new Error("model picker is empty");
+      const checkBtn = page.locator('[data-testid="onb-check-key"]');
+      if (await checkBtn.isVisible().catch(() => false)) await checkBtn.click();
+      else await page.getByRole("button", { name: "Check key" }).click();
+      // 10.19+: rich listbox [data-testid=onb-models] [role=option]; older: <select>.
+      const n = await until(async () => {
+        const opts = await page.locator('[data-testid="onb-models"] [role="option"]').count();
+        if (opts) return opts;
+        const sel = page.locator(".sob-field", { hasText: "Model" }).locator("select:not([disabled])");
+        return (await sel.count()) ? sel.first().locator("option").count() : 0;
+      }, 60_000, 1000);
+      if (!n) {
+        const msg = (await page.locator(".iob-msg, .sob-alert, [role=alert]").allInnerTexts().catch(() => [])).join(" | ");
+        throw new Error(`no models listed after Check key ${msg ? `(${msg})` : ""}`);
+      }
       if (!brainSaved) {
-        await page.getByRole("button", { name: "Save key" }).click();
-        await sleep(4000);
+        const save = page.locator('[data-testid="onb-test-save"]');
+        if (await save.isVisible().catch(() => false)) await save.click();
+        else await page.getByRole("button", { name: "Save key" }).click();
+        await sleep(8000);
         brainSaved = name;
       }
       return `key accepted, ${n} models in the picker${brainSaved === name ? " (saved as the brain)" : ""}`;
