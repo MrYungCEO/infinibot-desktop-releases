@@ -91,6 +91,9 @@ jobs:
           }
           # Docker too: a new user's machine has none (runner images ship it).
           foreach ($svc in @('docker','com.docker.service')) { Stop-Service $svc -Force -ErrorAction SilentlyContinue }
+          foreach ($f in @("$env:WINDIR\System32\docker.exe", "$env:WINDIR\System32\dockerd.exe", "C:\Program Files\Docker\docker.exe", "C:\Program Files\Docker\dockerd.exe")) {
+            if (Test-Path $f) { takeown /f $f /a | Out-Null; icacls $f /grant "*S-1-5-32-544:F" | Out-Null; Rename-Item $f ((Split-Path $f -Leaf) + ".gate-hidden"); "hid $f" }
+          }
           # PATH of a fresh Windows 11 user, nothing from the runner image.
           $clean = @("$env:WINDIR\system32", "$env:WINDIR", "$env:WINDIR\System32\Wbem", "$env:WINDIR\System32\WindowsPowerShell\v1.0\", "$env:WINDIR\System32\OpenSSH\", "$env:LOCALAPPDATA\Microsoft\WindowsApps") -join ';'
           "IB_GATE_CLEAN_PATH=$clean" >> $env:GITHUB_ENV
