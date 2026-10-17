@@ -57,8 +57,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vcruntime: [old-14.29, missing]
-    name: windows (vcruntime ${{ matrix.vcruntime }})
+        include:
+          - { vcruntime: old-14.29, node: none }
+          - { vcruntime: missing, node: none }
+          # A user who already has Node.js: npm.cmd on PATH. 2026.10.18 spawned
+          # it without a shell → EINVAL → "npm install failed (exit -1)".
+          - { vcruntime: current, node: installed }
+    name: windows (vcruntime ${{ matrix.vcruntime }}, node ${{ matrix.node }})
     runs-on: windows-latest
     timeout-minutes: 110
     outputs:
@@ -82,11 +87,13 @@ jobs:
       - name: Install Playwright (gate runner only)
         working-directory: gate
         run: npm install --no-audit --no-fund "@playwright/test@$env:PLAYWRIGHT_VERSION"
-      - name: Make the machine Node- and Docker-free (keep a private node for Playwright)
+      - name: Consumer PC PATH (node ${{ matrix.node }}, no Docker; private node for Playwright)
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\gate-node" | Out-Null
           Copy-Item (Get-Command node).Source "$env:RUNNER_TEMP\gate-node\node.exe"
-          foreach ($d in @("C:\Program Files\nodejs", "$env:RUNNER_TOOL_CACHE\node", "C:\npm\prefix", "$env:APPDATA\npm")) {
+          $hide = @("$env:RUNNER_TOOL_CACHE\node", "C:\npm\prefix")
+          if ('${{ matrix.node }}' -eq 'none') { $hide += @("C:\Program Files\nodejs", "$env:APPDATA\npm") }
+          foreach ($d in $hide) {
             if (Test-Path $d) { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden"); "hid $d" }
           }
           # Docker too: a new user's machine has none (runner images ship it).
@@ -95,16 +102,22 @@ jobs:
             if (Test-Path $f) { takeown /f $f /a | Out-Null; icacls $f /grant "*S-1-5-32-544:F" | Out-Null; Rename-Item $f ((Split-Path $f -Leaf) + ".gate-hidden"); "hid $f" }
           }
           # PATH of a fresh Windows 11 user, nothing from the runner image.
-          $clean = @("$env:WINDIR\system32", "$env:WINDIR", "$env:WINDIR\System32\Wbem", "$env:WINDIR\System32\WindowsPowerShell\v1.0\", "$env:WINDIR\System32\OpenSSH\", "$env:LOCALAPPDATA\Microsoft\WindowsApps") -join ';'
+          $parts = @("$env:WINDIR\system32", "$env:WINDIR", "$env:WINDIR\System32\Wbem", "$env:WINDIR\System32\WindowsPowerShell\v1.0\", "$env:WINDIR\System32\OpenSSH\", "$env:LOCALAPPDATA\Microsoft\WindowsApps")
+          # Node.js installer adds exactly these two.
+          if ('${{ matrix.node }}' -eq 'installed') { $parts += @("C:\Program Files\nodejs\", "$env:APPDATA\npm") }
+          $clean = $parts -join ';'
           "IB_GATE_CLEAN_PATH=$clean" >> $env:GITHUB_ENV
           $env:PATH = $clean
-          foreach ($c in @('node','npm','npx','docker')) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH: $((Get-Command $c).Source)" } }
-          "no node/npm/npx/docker on PATH"
+          $absent = @('docker'); if ('${{ matrix.node }}' -eq 'none') { $absent += @('node','npm','npx') }
+          foreach ($c in $absent) { if (Get-Command $c -ErrorAction SilentlyContinue) { throw "$c still on PATH: $((Get-Command $c).Source)" } }
+          if ('${{ matrix.node }}' -eq 'installed') { "node on PATH (as a Node.js user): $((Get-Command node).Source) $(& node --version)"; "npm: $((Get-Command npm).Source)" }
+          "absent from PATH: $($absent -join ', ')"
       - name: VC++ runtime like a consumer PC (${{ matrix.vcruntime }})
         run: |
           $sys = "$env:WINDIR\System32"
           $dlls = 'msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','msvcp140_atomic_wait.dll','msvcp140_codecvt_ids.dll','vcruntime140.dll','vcruntime140_1.dll','concrt140.dll','vccorlib140.dll','vcomp140.dll'
           "before: msvcp140 $((Get-Item "$sys\msvcp140.dll").VersionInfo.FileVersion)"
+          if ('${{ matrix.vcruntime }}' -eq 'current') { "keeping the runner's VC++ runtime"; return }
           if ('${{ matrix.vcruntime }}' -eq 'old-14.29') {
             python -m pip download msvc-runtime==14.29.30133 --no-deps --only-binary=:all: --platform win_amd64 --python-version 3.10 -d "$env:RUNNER_TEMP\vc" -q
             $whl = Get-ChildItem "$env:RUNNER_TEMP\vc\*.whl" | Select-Object -First 1
@@ -140,7 +153,7 @@ jobs:
         env:
           IB_GATE_APP: C:\IBGate\InfiniBot\InfiniBot.exe
           IB_GATE_PLATFORM: windows
-          IB_GATE_VARIANT: vcruntime-${{ matrix.vcruntime }}
+          IB_GATE_VARIANT: vcruntime-${{ matrix.vcruntime }} node-${{ matrix.node }}
           IB_GATE_EXPECT_VERSION: ${{ inputs.tag }}
         run: |
           $env:PATH = $env:IB_GATE_CLEAN_PATH
@@ -152,7 +165,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gate-windows-${{ matrix.vcruntime }}
+          name: gate-windows-vc-${{ matrix.vcruntime }}-node-${{ matrix.node }}
           path: gate/out
           if-no-files-found: warn
 
