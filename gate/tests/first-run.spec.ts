@@ -271,7 +271,7 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     await shot(page, "usecases");
     await page.locator('[data-testid="onb-next"]').click();
     await expect(page.locator('[data-testid^="onb-brain-card-"]:not(.is-skeleton)').first()).toBeVisible({ timeout: 90_000 });
-    const cards = await page.locator('[data-testid^="onb-brain-card-"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!.replace("onb-brain-card-", "")));
+    const cards = await page.locator('[data-testid^="onb-brain-card-"]:not([data-testid$="-state"])').evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!.replace("onb-brain-card-", "")));
     facts.brainCards = cards;
     return `${facts.onboardingLayout} layout; brain cards: ${cards.join(", ")}`;
   });
