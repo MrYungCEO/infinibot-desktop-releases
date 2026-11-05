@@ -257,7 +257,15 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
 
   // ── 2. Onboarding opens; pick use cases ────────────────────────────────
   await check(page, "onboarding-opens", "Onboarding opens by itself; use-case step works", async () => {
-    await expect(page.locator('[data-testid="onboarding-flow"]')).toBeVisible({ timeout: 120_000 });
+    // 2026.11+: chat-first onboarding — the setup is a conversation inside /webchat
+    // (data-testid="onboarding-chat"); older builds used the full-screen flow.
+    const root = page.locator('[data-testid="onboarding-chat"], [data-testid="onboarding-flow"]').first();
+    await expect(root).toBeVisible({ timeout: 120_000 });
+    facts.onboardingLayout = await root.getAttribute("data-testid");
+    if (!(await visible(page, '[data-testid="onb-uc-coding"]'))) {
+      // Re-opened on a later step (progress is saved): go back to the use cases.
+      await page.locator('[data-testid="ocs-answer-usecases"] .ocs-edit').click({ timeout: 10_000 }).catch(() => {});
+    }
     await page.locator('[data-testid="onb-uc-coding"]').click();
     await page.locator('[data-testid="onb-uc-assistant"]').click();
     await shot(page, "usecases");
@@ -265,7 +273,7 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     await expect(page.locator('[data-testid^="onb-brain-card-"]:not(.is-skeleton)').first()).toBeVisible({ timeout: 90_000 });
     const cards = await page.locator('[data-testid^="onb-brain-card-"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!.replace("onb-brain-card-", "")));
     facts.brainCards = cards;
-    return `brain cards: ${cards.join(", ")}`;
+    return `${facts.onboardingLayout} layout; brain cards: ${cards.join(", ")}`;
   });
 
   // ── 3. Every AI-brain quick option: installed + sign-in URL via the system browser
@@ -543,6 +551,19 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     const yml = await fetch(`${FEED}/${PLATFORM === "linux" ? "latest-linux.yml" : "latest.yml"}`).then((r) => r.text());
     const feedVersion = /^version:\s*(\S+)/m.exec(yml)?.[1];
     facts.feedVersion = feedVersion;
+    // Simple mode (default since 2026.11.4) hides the sidebar update chip; Simple users get
+    // the native autoUpdater dialog. Check the chip in Advanced mode, where it lives.
+    if (!(await visible(page, ".sidebar-upd-desktop"))) {
+      const mode: any = await rpc(page, "ui.mode.get", {}).catch(() => null);
+      facts.uiMode = mode?.mode ?? mode;
+      if ((mode?.mode ?? mode) !== "advanced") {
+        await rpc(page, "ui.mode.set", { mode: "advanced" }).catch(() => {});
+        await page.evaluate(() => localStorage.setItem("infinibot.uiMode.v1", "advanced")).catch(() => {});
+        await page.reload().catch(() => {});
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await until(async () => visible(page, ".sidebar-upd, button.nav-footer-toggle"), 60_000, 1000);
+      }
+    }
     if (!(await visible(page, ".sidebar-upd-desktop"))) {
       const t = page.locator("button.nav-footer-toggle").first();
       if (await t.isVisible().catch(() => false)) await t.click();
@@ -636,8 +657,10 @@ async function backToBrainCards(p: Page) {
   }
   await until(async () => visible(p, '[data-testid^="onb-brain-card-"]'), 60_000, 1000);
   if (!(await visible(p, '[data-testid^="onb-brain-card-"]'))) {
-    // Reloaded onto another step: use the rail.
-    await p.locator('.sob-node[aria-label^="Step 2"]').first().click().catch(() => {});
+    // Reloaded onto another step: chat layout → "Change" on the brain turn; console → the rail.
+    if (await visible(p, '[data-testid="ocs-answer-model"] .ocs-edit')) await p.locator('[data-testid="ocs-answer-model"] .ocs-edit').first().click().catch(() => {});
+    else if (await visible(p, '[data-testid="onb-uc-coding"]')) await p.locator('[data-testid="onb-next"]').click().catch(() => {});
+    else await p.locator('.sob-node[aria-label^="Step 2"]').first().click().catch(() => {});
     await until(async () => visible(p, '[data-testid^="onb-brain-card-"]'), 30_000, 1000);
   }
 }
