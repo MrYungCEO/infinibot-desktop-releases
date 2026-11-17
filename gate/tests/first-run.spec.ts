@@ -528,8 +528,18 @@ test("brand-new user: install → onboarding → brains → voice → chat → u
     }
     await expect(input).toBeVisible({ timeout: 60_000 });
     await expect(input).toBeEnabled({ timeout: 60_000 });
-    await input.fill("Reply with exactly two words: GATE OK");
-    await page.locator("button.wc-send").click();
+    // The post-onboarding gateway restart reconnects the UI and can re-render
+    // the composer right after fill(), clearing it (Send stays disabled). Wait
+    // for Send to enable, re-filling if the text was wiped (slow runners).
+    const send = page.locator("button.wc-send");
+    const prompt = "Reply with exactly two words: GATE OK";
+    for (let i = 0; i < 6; i++) {
+      await expect(input).toBeVisible({ timeout: 60_000 });
+      if ((await input.inputValue().catch(() => "")) !== prompt) await input.fill(prompt);
+      if (await send.isEnabled({ timeout: 10_000 }).catch(() => false)) break;
+      await sleep(5000);
+    }
+    await send.click();
     const got = await until(async () => {
       const asst = (await page.locator(".wc-asst .wc-md").last().textContent().catch(() => ""))?.trim();
       const streaming = await visible(page, ".wc-caret");
