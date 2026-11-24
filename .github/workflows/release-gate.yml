@@ -94,7 +94,17 @@ jobs:
           $hide = @("$env:RUNNER_TOOL_CACHE\node", "C:\npm\prefix")
           if ('${{ matrix.node }}' -eq 'none') { $hide += @("C:\Program Files\nodejs", "$env:APPDATA\npm") }
           foreach ($d in $hide) {
-            if (Test-Path $d) { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden"); "hid $d" }
+            if (Test-Path $d) {
+              # Newer runner images lock the tool cache (Access denied). Take ownership and
+              # retry; if it is still locked, keep going: the clean PATH below and the
+              # "still on PATH" check are what make the machine Node-free for the app.
+              try { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden") -ErrorAction Stop; "hid $d" }
+              catch {
+                takeown /f $d /r /d y /a 2>&1 | Out-Null; icacls $d /grant "*S-1-5-32-544:F" /t /c /q 2>&1 | Out-Null
+                try { Rename-Item $d -NewName ((Split-Path $d -Leaf) + ".gate-hidden") -ErrorAction Stop; "hid $d (after takeown)" }
+                catch { "::warning::could not hide $d ($($_.Exception.Message)); it stays off PATH" }
+              }
+            }
           }
           # Docker too: a new user's machine has none (runner images ship it).
           foreach ($svc in @('docker','com.docker.service')) { Stop-Service $svc -Force -ErrorAction SilentlyContinue }
